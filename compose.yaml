@@ -1,0 +1,49 @@
+name: media-downloader
+
+services:
+  app:
+    image: media-downloader:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    init: true
+    # The optional file also carries indexed Telegram__AllowedUserIds__N values.
+    # An absent file leaves appsettings.json's empty whitelist unchanged.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ASPNETCORE_URLS: http://+:8080
+      Media__WorkingRoot: /app/data/work
+      Telegram__Enabled: "${Telegram__Enabled:-false}"
+      Telegram__BotToken: "${Telegram__BotToken:-}"
+      Telegram__BaseUrl: "${Telegram__BaseUrl:-https://api.telegram.org}"
+      Telegram__UseLocalBotApi: "${Telegram__UseLocalBotApi:-false}"
+      Telegram__MaxUploadSizeBytes: "${Telegram__MaxUploadSizeBytes:-50000000}"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - work-data:/app/data/work
+
+  telegram-bot-api:
+    image: media-downloader-telegram:0.1.0
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram
+      target: final
+    profiles: [telegram-local]
+    init: true
+    environment:
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID:-}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:-}"
+    expose:
+      - "8081"
+    # This cache belongs to Bot API; application job cleanup does not remove it.
+    volumes:
+      - telegram-data:/var/lib/telegram-bot-api
+
+volumes:
+  work-data:
+  telegram-data:

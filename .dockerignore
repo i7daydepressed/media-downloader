@@ -1,0 +1,25 @@
+# Only application sources, the project license and container recipes enter the context.
+**
+!MediaDownloader.csproj
+!Program.cs
+!appsettings.json
+!LICENSE
+!configuration/
+!configuration/*.cs
+!controllers/
+!controllers/*.cs
+!dto/
+!dto/*.cs
+!exceptions/
+!exceptions/*.cs
+!services/
+!services/*.cs
+!telegram/
+!telegram/*.cs
+!tools/
+!tools/*.cs
+!Dockerfile
+!Dockerfile.telegram
+!.dockerignore
+!docker/
+!docker/telegram-entrypoint.sh

@@ -1,0 +1,34 @@
+FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5 AS build
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates cmake g++ make gperf git libssl-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src/telegram-bot-api
+RUN git init \
+    && git remote add origin https://github.com/tdlib/telegram-bot-api.git \
+    && git fetch --depth 1 origin 7232881b39dfcd048a0d569f1983c5184249ee05 \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = 7232881b39dfcd048a0d569f1983c5184249ee05 \
+    && git submodule update --init --depth 1 td \
+    && test "$(git -C td rev-parse HEAD)" = c8828d50f5eac2fc7089ce1089d7ce9095c61b5e
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/telegram-bot-api \
+    && cmake --build build --target install --parallel 2 \
+    && strip /opt/telegram-bot-api/bin/telegram-bot-api
+
+FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5 AS final
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates libssl3t64 zlib1g libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 telegram \
+    && useradd --uid 10001 --gid 10001 --create-home \
+        --home-dir /var/lib/telegram-bot-api --shell /usr/sbin/nologin telegram \
+    && install -d -o telegram -g telegram \
+        /var/lib/telegram-bot-api/data /var/lib/telegram-bot-api/temp
+COPY --from=build /opt/telegram-bot-api/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
+COPY --chmod=755 docker/telegram-entrypoint.sh /usr/local/bin/telegram-entrypoint.sh
+LABEL org.opencontainers.image.source="https://github.com/tdlib/telegram-bot-api" \
+    org.opencontainers.image.revision="7232881b39dfcd048a0d569f1983c5184249ee05"
+WORKDIR /var/lib/telegram-bot-api
+USER telegram:telegram
+EXPOSE 8081
+ENTRYPOINT ["/usr/local/bin/telegram-entrypoint.sh"]

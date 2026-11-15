@@ -1,0 +1,123 @@
+# media downloader 0.1.0
+
+Небольшой сервис ASP.NET Core/.NET 10 скачивает фото, видео и альбомы по HTTP/HTTPS-ссылкам. HTTP API возвращает ZIP, Telegram-адаптер отправляет каждый файл в личный чат. Оба используют один MediaService и yt-dlp/gallery-dl/FFmpeg/FFprobe.
+
+Поддержка источника зависит от внешней платформы и версии загрузчика. Недоступная или неподдерживаемая ссылка получает явный результат ошибки; остальные ссылки продолжают обрабатываться. Плейлисты/live и источники, требующие cookies/авторизации, не поддерживаются. Отдельная фоновая музыка TikTok-фото не извлекается.
+
+## HTTP через Docker
+
+Нужны Docker и Compose 2.24.0+; обычный запуск не требует Telegram-реквизитов или настоящего `.env`. Команды выполняются из корня проекта:
+
+```sh
+docker compose up -d --build app
+curl --fail http://127.0.0.1:8080/health
+```
+
+Health возвращает статус процесса и версию: `{"status":"ok","version":"0.1.0"}`. Порт приложения опубликован только на `127.0.0.1:8080`.
+
+Пример запроса: замените `https://example.com/video` своей ссылкой. Это заполнитель, а не поддерживаемый источник.
+
+```sh
+mkdir -p data/client
+curl --fail-with-body --silent --show-error \
+  http://127.0.0.1:8080/api/media/download \
+  -H 'Content-Type: application/json' \
+  --data '{"urls":["https://example.com/video"]}' \
+  -o data/client/media.zip
+```
+
+ZIP содержит каждый успешный файл и `results.json`. Порядок URL/дубли сохраняются, один URL может дать несколько файлов. Индексы начинаются с нуля; `fileName` указывает на одноимённый ZIP entry. Пример структуры manifest:
+
+```json
+{
+  "results": [
+    {
+      "index": 0,
+      "url": "https://example.com/video",
+      "success": true,
+      "files": [
+        {"index": 0, "fileName": "0001-0001.jpg", "sizeBytes": 123, "durationSeconds": null, "width": 640, "height": 480}
+      ],
+      "errorCode": null,
+      "errorMessage": null
+    }
+  ]
+}
+```
+
+Числа и успешный результат в этом примере иллюстрируют контракт, не скачивание с example.com. Внутренних путей в JSON нет. Ошибка отдельного скачивания — `success:false`, пустой `files`, `errorCode`/`errorMessage`. Даже при ошибках всех URL HTTP 200 содержит отчётный ZIP; такой статус сам по себе не означает успешное скачивание медиа. Неверная форма/URL/JSON — HTTP 400 до запуска инструментов. Общая ошибка имеет `code`, `message`, `status`, `traceId` без stack trace.
+
+`POST /api/media/download/links` всегда возвращает HTTP 501/not_implemented: хранение файлов, отдельные постоянные ссылки и повторное скачивание не реализованы.
+
+## Telegram
+
+Создайте `.env` из [.env.example](.env.example), сохраняя существующий файл, и заполните его своими значениями:
+
+- `Telegram__Enabled=true` и собственный `Telegram__BotToken`.
+- Положительные числовые ID отправителей: `Telegram__AllowedUserIds__0`, затем `__1`, `__2` и т. д. Раскомментируйте строку примера и замените placeholder. Не оставляйте включённый индекс пустым и не передавайте JSON-массив одной переменной.
+- Для облачного API оставьте `Telegram__BaseUrl=https://api.telegram.org`, `Telegram__UseLocalBotApi=false`, `Telegram__MaxUploadSizeBytes=50000000`. API ID/hash облачному адаптеру не нужны.
+
+```sh
+cp -n .env.example .env
+# После заполнения собственных значений:
+docker compose up -d --build app
+```
+
+Бот принимает только личные чаты; whitelist проверяется по реальному `from.id`, не username. Пустой список запрещает доступ всем. Сообщение должно целиком состоять из HTTP/HTTPS-ссылок через пробелы или переносы строк. Дубли разрешены. Произвольный текст, команды вроде `/start` и вложения без такого текста приводят к подсказке формата; отдельные команды/кнопки не предусмотрены.
+
+Long polling принимает сообщения независимо от загрузки; очередь ограничена. Переполненный запрос получает отказ. Worker вызывает тот же MediaService, что HTTP, но для Telegram предпочитает готовый MP4/H.264 с AAC или без аудио; такой вариант может иметь другое разрешение/битрейт. Подтверждённый FFprobe совместимый файл отправляется как видео через multipart `sendVideo`, остальные файлы — по одному как документы через `sendDocument`. Автоматического перекодирования нет; наличие встроенного плеера для документов не гарантируется. Неудача одного файла/URL не останавливает следующие. Только подтверждённый ответ API разрешает удалить соответствующую рабочую копию. При потере ответа отправка может оказаться неподтверждённой; копия остаётся до перезапуска, автоматического повтора неоднозначной доставки нет. Явный ответ 429 допускает максимум 2 дополнительные попытки с новым stream после полного `retry_after`; неопределённый network/timeout не повторяется.
+
+### Локальный Bot API
+
+Для больших файлов предусмотрен отдельный официальный сервер Bot API. До переноса уже используемого бота выполните требуемый Telegram `logOut` на прежнем сервере согласно [официальной инструкции](https://core.telegram.org/bots/api#using-a-local-bot-api-server). Приложение не вызывает `logOut`/`deleteWebhook` автоматически; активный webhook также нужно учитывать перед long polling.
+
+В `.env` задайте собственные `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`, token/whitelist и:
+
+```dotenv
+Telegram__BaseUrl=http://telegram-bot-api:8081
+Telegram__UseLocalBotApi=true
+Telegram__MaxUploadSizeBytes=2000000000
+```
+
+```sh
+docker compose --profile telegram-local up -d --build
+```
+
+Native-сборка Bot API может занять несколько минут; рецепт ограничен двумя параллельными задачами. Порт 8081 доступен только внутри сети Compose. Файлы передаются байтами multipart, общий файловый том приложения и Bot API не требуется. Лимит приложения для облачного API — 50 000 000 байт на файл; в локальном режиме можно настроить до 2 000 000 000 байт.
+
+`work-data` хранит рабочие задания приложения, `telegram-data` — отдельный кеш Bot API. Очистка приложения не удаляет кеш Bot API. `docker compose down` останавливает компоненты и сохраняет тома; автоматического удаления кеша нет.
+
+## Настройки и жизненный цикл
+
+Все начальные значения — в [appsettings.json](appsettings.json). Переменные .NET используют `__`, например `Media__MaxUrlsPerBatch=5`. Compose передаёт весь optional `.env` приложению, в том числе indexed whitelist; настоящий `.env` не хранится в Git. `dotnet run` самостоятельно `.env` не читает.
+
+| Параметр | Начальное значение |
+| --- | --- |
+| Media.MaxUrlsPerBatch / MaxFilesPerUrl | 10 URL / 100 файлов на URL |
+| Media.MaxConcurrentOperations | 1 активный batch для обоих адаптеров |
+| Media.WorkingRoot | `data/work`, в Docker `/app/data/work` |
+| Media.MaxFileSizeBytes | 2 000 000 000 байт на файл |
+| Media.AllowLocalUrls | false; разрешение локальных URL задаётся отдельно |
+| Tools.ProcessTimeoutSeconds | 600 на один внешний процесс |
+| Tools.MaxCapturedOutputCharacters | 65 536 на stdout и отдельно на stderr |
+| Telegram.QueueCapacity / PollingTimeoutSeconds | 20 сообщений / 30 секунд |
+| Telegram.RetryDelaySeconds | 3 для polling retry без retry_after |
+| Telegram.UploadTimeoutSeconds | 1800, диапазон 1–86 400; отдельный deadline upload |
+| Telegram.MaxUploadSizeBytes | 50 000 000 cloud; local может быть до 2 000 000 000 |
+
+Рабочий корень принадлежит одному экземпляру приложения: startup cleanup не координирует несколько одновременно запущенных серверов. Своё задание имеет GUID/маркер. После HTTP-передачи, ошибки или обрыва его файлы очищаются. Неподтверждённые Telegram-файлы остаются до следующего старта; восстановление заданий/повторная отправка не предусмотрены. Чужие файлы и верхнеуровневые symlink не удаляются; рабочие пути с symlink запрещены. Отказ файловой очистки журналируется, оставшиеся собственные каталоги повторно обрабатываются на старте.
+
+Предел размера передаётся утилитам и проверяется по готовому файлу; строгий дисковый quota при неизвестном заранее размере/merge не обеспечивается. URL с credentials/явными локальными и приватными literal адресами запрещаются. Сервис предназначен для доверенного локального HTTP-клиента; фильтр не заявляется полной SSRF-защитой через DNS/redirect. Интернет-публикация и HTTP-аутентификация не входят в версию.
+
+## Запуск из исходников
+
+Для native запуска нужны .NET SDK 10 и доступные yt-dlp/gallery-dl/FFmpeg/FFprobe; пути задаются `Tools`. Для современного YouTube нужен поддерживаемый JS runtime и EJS. Docker фиксирует окружение: .NET/ASP.NET 10.0.9, yt-dlp 2026.10.26, gallery-dl 1.32.20, EJS 0.8.0, Deno 2.9.8, FFmpeg/FFprobe 6.1.1. Нативно эти утилиты на устройство автоматически не устанавливаются.
+
+```sh
+dotnet run --project MediaDownloader.csproj -- --urls http://127.0.0.1:5080
+dotnet build MediaDownloader.csproj -c Release
+```
+
+Для проверки загрузки выполните обычный HTTP-запрос со своей ссылкой, как в разделе выше, и проверьте каждый `success`, список `files` и сами файлы в ZIP. Ошибки источника внутри `results.json` означают неуспешное скачивание независимо от HTTP 200. Обновление закреплённых версий описано в [README.md](README.md).
+
+Основные части: `controllers` — HTTP/владение ZIP; `services/MediaService.cs` — общий сценарий; `tools` — процессы/медиа/рабочие файлы/архив; `telegram` — протокол, whitelist/очередь/worker/polling; `dto`, `configuration`, `exceptions` — контракты/настройки/HTTP-ошибки.
