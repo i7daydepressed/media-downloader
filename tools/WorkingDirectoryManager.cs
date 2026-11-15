@@ -85,6 +85,15 @@ public sealed class WorkingDirectoryManager {
         return fullPath;
     }
 
+    public string createPreparationDirectory(string jobDirectory, string sourcePath) {
+        string parent = Path.GetDirectoryName(validateFilePath(jobDirectory, sourcePath))!;
+        string directory = Path.Combine(parent, "prepared-" + Guid.NewGuid().ToString("N"));
+        ensureNoSymbolicLinks(directory);
+        Directory.CreateDirectory(directory);
+        ensureNoSymbolicLinks(directory);
+        return directory;
+    }
+
     public Task<bool> cleanupAttemptAsync(string jobDirectory, string attemptDirectory) {
         return cleanupAsync(jobDirectory, attemptDirectory, false);
     }
@@ -97,6 +106,10 @@ public sealed class WorkingDirectoryManager {
     }
 
     public Task<bool> deleteDeliveredFileAsync(string jobDirectory, string filePath) {
+        return deleteOwnedFileAsync(jobDirectory, filePath);
+    }
+
+    public Task<bool> deleteOwnedFileAsync(string jobDirectory, string filePath) {
         try {
             requireOwnedJob(jobDirectory);
             string fullPath = Path.GetFullPath(filePath);

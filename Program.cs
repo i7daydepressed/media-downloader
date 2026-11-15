@@ -47,6 +47,7 @@ public class Program {
         builder.Services.AddSingleton<FfprobeClient>();
         builder.Services.AddSingleton<YtDlpClient>();
         builder.Services.AddSingleton<GalleryDlClient>();
+        builder.Services.AddSingleton<MediaPreparationService>();
         builder.Services.AddSingleton<MediaService>();
         builder.Services.AddSingleton<MediaArchiveWriter>();
         builder.Services.AddHostedService<WorkingDirectoryCleanupService>();

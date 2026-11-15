@@ -26,4 +26,11 @@ public sealed class FfmpegClient {
         ExternalProcessResult result = await runner.runAsync(resolveExecutablePath(), new[] { "-version" }, contentRoot, cancellationToken);
         return result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? string.Empty;
     }
+
+    public async Task remuxToMp4Async(string sourcePath, string outputPath, CancellationToken cancellationToken) {
+        await runner.runAsync(resolveExecutablePath(), new[] {
+            "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-i", sourcePath,
+            "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", outputPath
+        }, Path.GetDirectoryName(outputPath)!, cancellationToken);
+    }
 }

@@ -9,4 +9,5 @@ public sealed class MediaProbeResult {
     public string? PixelFormat { get; init; }
     public string? ContainerFormat { get; init; }
     public bool IsCompatibleVideo { get; init; }
+    public bool HasCompatibleMp4Streams { get; init; }
 }

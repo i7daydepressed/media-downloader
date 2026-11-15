@@ -14,18 +14,20 @@ public sealed class MediaService : IDisposable {
     private readonly YtDlpClient ytDlp;
     private readonly GalleryDlClient galleryDl;
     private readonly FfprobeClient ffprobe;
+    private readonly MediaPreparationService preparation;
     private readonly WorkingDirectoryManager directories;
     private readonly IHostApplicationLifetime lifetime;
     private readonly ILogger<MediaService> logger;
     private readonly SemaphoreSlim gate;
 
     public MediaService(IOptions<MediaOptions> options, YtDlpClient ytDlp, GalleryDlClient galleryDl,
-        FfprobeClient ffprobe, WorkingDirectoryManager directories, IHostApplicationLifetime lifetime,
+        FfprobeClient ffprobe, MediaPreparationService preparation, WorkingDirectoryManager directories, IHostApplicationLifetime lifetime,
         ILogger<MediaService> logger) {
         this.options = options.Value;
         this.ytDlp = ytDlp;
         this.galleryDl = galleryDl;
         this.ffprobe = ffprobe;
+        this.preparation = preparation;
         this.directories = directories;
         this.lifetime = lifetime;
         this.logger = logger;
@@ -86,6 +88,9 @@ public sealed class MediaService : IDisposable {
                 throw new ExternalToolException("Источник не вернул один итоговый видеофайл.", "output_missing");
             }
             List<MediaFileResult> files = await validateFilesAsync(jobDirectory, firstAttempt, index, paths, cancellationToken);
+            if (preferCompatibleVideo) {
+                files = await preparation.prepareAsync(jobDirectory, files, cancellationToken);
+            }
             return new MediaResult { Index = index, Url = url, Success = true, Files = files };
         }
         catch (ExternalToolException exception) {
@@ -100,6 +105,9 @@ public sealed class MediaService : IDisposable {
         try {
             List<string> paths = await galleryDl.downloadAsync(url, secondAttempt, preferCompatibleVideo, cancellationToken);
             List<MediaFileResult> files = await validateFilesAsync(jobDirectory, secondAttempt, index, paths, cancellationToken);
+            if (preferCompatibleVideo) {
+                files = await preparation.prepareAsync(jobDirectory, files, cancellationToken);
+            }
             return new MediaResult { Index = index, Url = url, Success = true, Files = files };
         }
         catch (ExternalToolException exception) {

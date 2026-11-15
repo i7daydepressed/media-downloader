@@ -89,15 +89,16 @@ public sealed class FfprobeClient {
                 }
             }
             bool mp4Brand = majorBrand is "isom" or "iso2" or "iso3" or "iso4" or "iso5" or "iso6" or "iso7" or "iso8" or "iso9" or "mp41" or "mp42" or "avc1";
-            bool compatible = Path.GetExtension(filePath).Equals(".mp4", StringComparison.OrdinalIgnoreCase) &&
-                containerFormat?.Split(',').Contains("mp4", StringComparer.Ordinal) == true && mp4Brand &&
-                videoStreams == 1 && videoCodec == "h264" && pixelFormat == "yuv420p" &&
+            bool compatibleStreams = videoStreams == 1 && videoCodec == "h264" && pixelFormat == "yuv420p" &&
                 (audioStreams == 0 || (audioStreams == 1 && audioCodec == "aac")) &&
                 duration is > 0 and <= int.MaxValue && width is > 0 && height is > 0;
+            bool compatible = Path.GetExtension(filePath).Equals(".mp4", StringComparison.OrdinalIgnoreCase) &&
+                containerFormat?.Split(',').Contains("mp4", StringComparer.Ordinal) == true && mp4Brand && compatibleStreams;
             return new MediaProbeResult {
                 DurationSeconds = duration, Width = width, Height = height,
                 VideoCodec = videoCodec, AudioCodec = audioCodec, PixelFormat = pixelFormat,
-                ContainerFormat = containerFormat, IsCompatibleVideo = compatible
+                ContainerFormat = containerFormat, IsCompatibleVideo = compatible,
+                HasCompatibleMp4Streams = compatibleStreams && streams.GetArrayLength() == videoStreams + audioStreams
             };
         }
         catch (JsonException) {
