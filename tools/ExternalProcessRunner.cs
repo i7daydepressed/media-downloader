@@ -7,12 +7,14 @@ using Microsoft.Extensions.Options;
 
 namespace MediaDownloader.Tools;
 
+// запускаем внешние утилиты без shell, ограничиваем время и сохраняемый вывод
 public sealed class ExternalProcessRunner {
-    private readonly ToolOptions options;
-    private readonly string contentRoot;
-    private readonly ILogger<ExternalProcessRunner> logger;
-    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(5);
+    private readonly ToolOptions options; // время процесса и предел сохраняемого вывода
+    private readonly string contentRoot; // корень для относительных путей утилит
+    private readonly ILogger<ExternalProcessRunner> logger; // ошибки завершения процесса без сырого вывода
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromSeconds(5); // предел ожидания завершения и дочитывания потоков
 
+    // конструктор: сохраняем настройки Tools, корень приложения и журнал событий
     public ExternalProcessRunner(IOptions<ToolOptions> options, IHostEnvironment environment,
         ILogger<ExternalProcessRunner> logger) {
         this.options = options.Value;
@@ -20,7 +22,9 @@ public sealed class ExternalProcessRunner {
         this.logger = logger;
     }
 
+    // проверяем явный путь относительно приложения либо ищем имя утилиты в PATH
     public string resolveExecutablePath(string configuredPath) {
+        // для записи с разделителем проверяем полный путь, для простого имени перебираем каталоги PATH
         if (Path.IsPathRooted(configuredPath) || configuredPath.Contains(Path.DirectorySeparatorChar) ||
             configuredPath.Contains(Path.AltDirectorySeparatorChar)) {
             string fullPath = Path.GetFullPath(configuredPath, contentRoot);
@@ -47,6 +51,7 @@ public sealed class ExternalProcessRunner {
         throw new ExternalToolException("Не найден необходимый внешний инструмент.", "tool_unavailable");
     }
 
+    // запускаем процесс, читаем оба потока и возвращаем результат либо ошибку утилиты
     public async Task<ExternalProcessResult> runAsync(string executablePath, IReadOnlyList<string> arguments,
         string workingDirectory, CancellationToken cancellationToken) {
         cancellationToken.ThrowIfCancellationRequested();
@@ -54,6 +59,7 @@ public sealed class ExternalProcessRunner {
         if (!Directory.Exists(workingDirectory)) {
             throw new DirectoryNotFoundException("Рабочий каталог процесса отсутствует.");
         }
+        // передаем аргументы через ArgumentList без shell, перенаправляем stdout/stderr/stdin
         ProcessStartInfo startInfo = new ProcessStartInfo {
             FileName = executable,
             WorkingDirectory = workingDirectory,
@@ -75,21 +81,25 @@ public sealed class ExternalProcessRunner {
         catch (Exception exception) when (exception is Win32Exception or FileNotFoundException) {
             throw new ExternalToolException("Не удалось запустить внешний инструмент.", "tool_unavailable");
         }
+        // закрываем ввод и читаем stdout/stderr параллельно, чтобы заполненный поток не задерживал процесс
         process.StandardInput.Close();
         using CancellationTokenSource captureCancellation = new CancellationTokenSource();
         Task<CapturedOutput> stdout = readBoundedAsync(process.StandardOutput, captureCancellation.Token);
         Task<CapturedOutput> stderr = readBoundedAsync(process.StandardError, captureCancellation.Token);
+        // объединяем отмену запроса и ProcessTimeoutSeconds; после выхода отдельно ограничиваем дочитывание потоков
         using CancellationTokenSource timeout = new CancellationTokenSource(TimeSpan.FromSeconds(options.ProcessTimeoutSeconds));
         using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         try {
             await process.WaitForExitAsync(linked.Token);
             await Task.WhenAll(stdout, stderr).WaitAsync(DrainTimeout, linked.Token);
         }
+        // пытаемся остановить процесс; отмену запроса передаем выше, собственный срок превращаем в tool_timeout
         catch (OperationCanceledException) {
             await terminateAsync(process, captureCancellation, stdout, stderr);
             cancellationToken.ThrowIfCancellationRequested();
             throw new ExternalToolException("Превышено время работы внешнего инструмента.", "tool_timeout");
         }
+        // при зависшем дочитывании вывода также останавливаем процесс и возвращаем tool_output_timeout
         catch (TimeoutException) {
             await terminateAsync(process, captureCancellation, stdout, stderr);
             throw new ExternalToolException("Не удалось завершить чтение вывода инструмента.", "tool_output_timeout");
@@ -99,6 +109,7 @@ public sealed class ExternalProcessRunner {
             throw;
         }
         cancellationToken.ThrowIfCancellationRequested();
+        // после учета отмены требуем нулевой код завершения и собираем тексты с признаками усечения
         if (process.ExitCode != 0) {
             throw new ExternalToolException("Внешний инструмент не смог выполнить обработку.", "tool_failed");
         }
@@ -111,6 +122,7 @@ public sealed class ExternalProcessRunner {
         };
     }
 
+    // читаем поток целиком, но сохраняем не больше MaxCapturedOutputCharacters и отмечаем усечение
     private async Task<CapturedOutput> readBoundedAsync(StreamReader reader, CancellationToken cancellationToken) {
         char[] buffer = new char[4096];
         StringBuilder text = new StringBuilder(Math.Min(options.MaxCapturedOutputCharacters, 4096));
@@ -118,6 +130,7 @@ public sealed class ExternalProcessRunner {
         try {
             int count;
             while ((count = await reader.ReadAsync(buffer.AsMemory(), cancellationToken)) > 0) {
+                // после заполнения буфера продолжаем читать, сохраняя только оставшуюся допустимую часть
                 int retained = Math.Min(count, options.MaxCapturedOutputCharacters - text.Length);
                 text.Append(buffer, 0, retained);
                 truncated |= retained < count;
@@ -129,6 +142,7 @@ public sealed class ExternalProcessRunner {
         return new CapturedOutput { Text = text.ToString(), Truncated = truncated };
     }
 
+    // пытаемся завершить дерево процесса, дождаться выхода и остановить чтение потоков
     private async Task terminateAsync(Process process, CancellationTokenSource captureCancellation,
         Task<CapturedOutput> stdout, Task<CapturedOutput> stderr) {
         try {
@@ -145,6 +159,7 @@ public sealed class ExternalProcessRunner {
         catch (Exception exception) when (exception is TimeoutException or InvalidOperationException) {
             logger.LogWarning("Process exit wait returned {ExceptionType}.", exception.GetType().Name);
         }
+        // после ожидания процесса отменяем чтение и ограниченно ждем завершения обеих задач
         captureCancellation.Cancel();
         try {
             await Task.WhenAll(stdout, stderr).WaitAsync(DrainTimeout);
@@ -154,6 +169,7 @@ public sealed class ExternalProcessRunner {
         }
     }
 
+    // проверяем наличие файла и признаки исполняемости для текущей ОС
     private static bool isExecutable(string path) {
         if (!File.Exists(path) || Directory.Exists(path)) {
             return false;
@@ -166,8 +182,9 @@ public sealed class ExternalProcessRunner {
         return (mode & (UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
     }
 
+    // внутренний результат чтения одного потока
     private sealed class CapturedOutput {
-        public string Text { get; init; } = string.Empty;
-        public bool Truncated { get; init; }
+        public string Text { get; init; } = string.Empty; // сохраненная часть вывода
+        public bool Truncated { get; init; } // часть вывода отброшена или чтение отменено
     }
 }

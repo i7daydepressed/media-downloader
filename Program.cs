@@ -9,25 +9,31 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace MediaDownloader;
 
+// собираем HTTP-приложение, регистрируем службы и запускаем фоновые задачи Telegram
 public class Program {
-    public const string ApplicationVersion = "0.1.0";
+    public const string ApplicationVersion = "0.1.0"; // версия в ответе /health
 
+    // создаем приложение с аргументами запуска и запускаем сервер
     public static void Main(string[] args) {
         WebApplication application = createApplication(args);
         application.Run();
     }
 
+    // настраиваем HTTP, общие службы и Telegram, возвращаем готовое приложение
     public static WebApplication createApplication(
         string[] args, Action<WebApplicationBuilder>? configureBuilder = null) {
+        // создаем builder: .NET читает конфигурацию, аргументы запуска и переменные окружения
         WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationOptions {
             Args = args,
             ApplicationName = typeof(Program).Assembly.GetName().Name
         });
+        // применяем дополнительную настройку builder, если она передана; адрес по умолчанию задаем только при отсутствии urls
         configureBuilder?.Invoke(builder);
         if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])) {
             builder.WebHost.UseUrls("http://127.0.0.1:5080");
         }
 
+        // подключаем контроллеры, имена полей JSON в camelCase и общий ответ 400 для неверного входного JSON
         builder.Services.AddControllers().AddJsonOptions(options => {
             options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         }).ConfigureApiBehaviorOptions(options => {
@@ -38,9 +44,11 @@ public class Program {
         builder.Services.ConfigureHttpJsonOptions(options => {
             options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         });
+        // регистрируем HTTP-обработчик исключений и проверяемые настройки разделов Media, Tools и Telegram
         builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
         builder.Services.AddProblemDetails();
         addValidatedOptions(builder.Services);
+        // AddSingleton создает по одному экземпляру каждой службы на приложение, оба входа используют общий MediaService
         builder.Services.AddSingleton<ExternalProcessRunner>();
         builder.Services.AddSingleton<WorkingDirectoryManager>();
         builder.Services.AddSingleton<FfmpegClient>();
@@ -56,11 +64,13 @@ public class Program {
             new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false }),
             provider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TelegramOptions>>(),
             provider.GetRequiredService<ILogger<TelegramApiClient>>()));
+        // очередь передает задания от обработчика сообщений воркеру, polling получает обновления в фоне
         builder.Services.AddSingleton<TelegramDownloadQueue>();
         builder.Services.AddSingleton<TelegramUpdateHandler>();
         builder.Services.AddHostedService<TelegramDownloadWorker>();
         builder.Services.AddHostedService<TelegramPollingService>();
 
+        // собираем приложение, включаем обработку исключений, маршруты контроллеров и ответ /health
         WebApplication application = builder.Build();
         application.UseExceptionHandler();
         application.MapControllers();
@@ -71,7 +81,9 @@ public class Program {
         return application;
     }
 
+    // связываем разделы конфигурации с классами настроек и отклоняем неверные значения при запуске
     private static void addValidatedOptions(IServiceCollection services) {
+        // проверяем лимиты скачивания и рабочий путь из раздела Media
         services.AddOptions<MediaOptions>().BindConfiguration(MediaOptions.SectionName)
             .Validate(options => options.MaxUrlsPerBatch is >= 1 and <= 100,
                 "Media:MaxUrlsPerBatch must be between 1 and 100.")
@@ -85,6 +97,7 @@ public class Program {
                 "Media:MaxFileSizeBytes must be between 1 and 2000000000.")
             .ValidateOnStart();
 
+        // проверяем пути утилит, имя JS-среды, время процесса и размер сохраняемого вывода
         services.AddOptions<ToolOptions>().BindConfiguration(ToolOptions.SectionName)
             .Validate(options => isValidPath(options.YtDlpPath) && isValidPath(options.GalleryDlPath) && isValidPath(options.FfmpegPath) &&
                 isValidPath(options.FfprobePath) && isValidPath(options.JavaScriptRuntimePath),
@@ -98,6 +111,7 @@ public class Program {
                 "Tools:MaxCapturedOutputCharacters must be between 1024 and 1048576.")
             .ValidateOnStart();
 
+        // проверяем реквизиты и лимиты Telegram; формат токена обязателен при включенном адаптере
         services.AddOptions<TelegramOptions>().BindConfiguration(TelegramOptions.SectionName)
             .Validate(options => !options.Enabled || (!string.IsNullOrWhiteSpace(options.BotToken) &&
                 Regex.IsMatch(options.BotToken, "^[0-9]+:[A-Za-z0-9_-]+$")),
@@ -120,6 +134,7 @@ public class Program {
             .ValidateOnStart();
     }
 
+    // проверяем допустимость записи пути без создания файла и проверки его существования
     private static bool isValidPath(string? value) {
         if (string.IsNullOrWhiteSpace(value) || value.IndexOfAny(new[] { '\0', '\r', '\n' }) >= 0) {
             return false;
@@ -133,6 +148,7 @@ public class Program {
         }
     }
 
+    // проверяем адрес Bot API: HTTPS, либо HTTP в локальном режиме, без реквизитов и дополнительных частей URL
     private static bool isValidBotApiUrl(string? value, bool localMode) {
         return Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) &&
             (uri.Scheme == Uri.UriSchemeHttps || (localMode && uri.Scheme == Uri.UriSchemeHttp)) &&

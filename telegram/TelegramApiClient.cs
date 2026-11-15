@@ -6,12 +6,14 @@ using Microsoft.Extensions.Options;
 
 namespace MediaDownloader.Telegram;
 
+// обмен с Bot API: JSON для сообщений, multipart для файлов и проверка подтверждения операции
 public sealed class TelegramApiClient : IDisposable {
-    private const int MaxResponseBytes = 1_048_576;
-    private readonly HttpClient httpClient;
-    private readonly TelegramOptions options;
-    private readonly ILogger<TelegramApiClient> logger;
+    private const int MaxResponseBytes = 1_048_576; // предел читаемого JSON-ответа в байтах
+    private readonly HttpClient httpClient; // HTTP-соединения, освобождаемые в Dispose
+    private readonly TelegramOptions options; // адрес API, токен и время запросов
+    private readonly ILogger<TelegramApiClient> logger; // ограничения частоты отправки без вывода адреса с токеном
 
+    // конструктор: сохраняем клиент и настройки, срок каждого запроса задается в sendAsync
     public TelegramApiClient(HttpClient httpClient, IOptions<TelegramOptions> options, ILogger<TelegramApiClient> logger) {
         this.httpClient = httpClient;
         this.httpClient.Timeout = Timeout.InfiniteTimeSpan;
@@ -19,7 +21,9 @@ public sealed class TelegramApiClient : IDisposable {
         this.logger = logger;
     }
 
+    // запрашиваем сообщения с заданного offset и проверяем ID для безопасного продвижения опроса
     public async Task<List<TelegramUpdate>> getUpdatesAsync(long offset, CancellationToken cancellationToken) {
+        // передаем offset, время long polling и ограничение одним обновлением типа message
         using JsonContent content = JsonContent.Create(new {
             offset,
             timeout = options.PollingTimeoutSeconds,
@@ -34,6 +38,7 @@ public sealed class TelegramApiClient : IDisposable {
         return updates;
     }
 
+    // отправляем текст в чат и требуем положительный message_id в ответе
     public async Task sendMessageAsync(long chatId, string text, CancellationToken cancellationToken) {
         using JsonContent content = JsonContent.Create(new { chat_id = chatId, text });
         TelegramMessage message = await sendAsync<TelegramMessage>("sendMessage", content,
@@ -43,17 +48,21 @@ public sealed class TelegramApiClient : IDisposable {
         }
     }
 
+    // передаем файл в общий метод отправки с режимом document
     public Task sendDocumentAsync(long chatId, string filePath, string fileName, CancellationToken cancellationToken) {
         return sendFileAsync(chatId, filePath, fileName, false, null, null, null, cancellationToken);
     }
 
+    // передаем MP4 в общий метод отправки с режимом video и характеристиками кадра
     public Task sendVideoAsync(long chatId, string filePath, string fileName, double? durationSeconds,
         int? width, int? height, CancellationToken cancellationToken) {
         return sendFileAsync(chatId, filePath, fileName, true, durationSeconds, width, height, cancellationToken);
     }
 
+    // отправляем файл; только явный rate limit с задержкой допускает еще две попытки
     private async Task sendFileAsync(long chatId, string filePath, string fileName, bool video,
         double? durationSeconds, int? width, int? height, CancellationToken cancellationToken) {
+        // каждая попытка заново открывает файл; остальные ошибки выходят без автоматического повтора
         for (int attempt = 0; ; attempt++) {
             try {
                 await sendFileAttemptAsync(chatId, filePath, fileName, video, durationSeconds, width, height, cancellationToken);
@@ -68,9 +77,11 @@ public sealed class TelegramApiClient : IDisposable {
         }
     }
 
+    // открываем файл с начала, собираем multipart и проверяем подтверждение отправки
     private async Task sendFileAttemptAsync(long chatId, string filePath, string fileName, bool video,
         double? durationSeconds, int? width, int? height, CancellationToken cancellationToken) {
         try {
+            // передаем содержимое файла потоком, поле multipart и MIME выбираем по режиму video
             await using FileStream input = new FileStream(filePath, FileMode.Open, FileAccess.Read,
                 FileShare.Read, 65_536, FileOptions.Asynchronous | FileOptions.SequentialScan);
             using MultipartFormDataContent content = new MultipartFormDataContent();
@@ -78,6 +89,7 @@ public sealed class TelegramApiClient : IDisposable {
             StreamContent file = new StreamContent(input, 65_536);
             file.Headers.ContentType = new MediaTypeHeaderValue(video ? "video/mp4" : "application/octet-stream");
             content.Add(file, video ? "video" : "document", fileName);
+            // для видео добавляем допустимые длительность и размеры кадра, длительность округляем вверх до секунд
             if (video) {
                 if (durationSeconds is double duration && double.IsFinite(duration) && duration > 0 && duration <= int.MaxValue) {
                     content.Add(new StringContent(Math.Ceiling(duration).ToString(CultureInfo.InvariantCulture)), "duration");
@@ -89,6 +101,7 @@ public sealed class TelegramApiClient : IDisposable {
                     content.Add(new StringContent(height.Value.ToString(CultureInfo.InvariantCulture)), "height");
                 }
             }
+            // вызываем sendVideo или sendDocument; успешным считаем ответ с положительным MessageId
             TelegramMessage message = await sendAsync<TelegramMessage>(video ? "sendVideo" : "sendDocument", content,
                 TimeSpan.FromSeconds(options.UploadTimeoutSeconds), cancellationToken);
             if (message.MessageId <= 0) {
@@ -100,9 +113,11 @@ public sealed class TelegramApiClient : IDisposable {
         }
     }
 
+    // выполняем POST с отменой и сроком, читаем ограниченный JSON и возвращаем проверенный Result
     private async Task<T> sendAsync<T>(string method, HttpContent content, TimeSpan timeout,
         CancellationToken cancellationToken) where T : class {
         cancellationToken.ThrowIfCancellationRequested();
+        // объединяем отмену вызывающего метода с отдельным сроком этого запроса
         using CancellationTokenSource deadline = new CancellationTokenSource(timeout);
         using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
         try {
@@ -110,6 +125,7 @@ public sealed class TelegramApiClient : IDisposable {
             Uri endpoint = new Uri(options.BaseUrl.TrimEnd('/') + "/bot" + options.BotToken + "/" + method);
             using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, endpoint) { Content = content };
             using HttpResponseMessage response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token);
+            // читаем ответ блоками, превышение MaxResponseBytes отклоняем до разбора JSON
             await using Stream input = await response.Content.ReadAsStreamAsync(linked.Token);
             using MemoryStream body = new MemoryStream();
             byte[] buffer = new byte[8192];
@@ -120,6 +136,7 @@ public sealed class TelegramApiClient : IDisposable {
                 }
                 body.Write(buffer, 0, count);
             }
+            // разбираем оболочку ответа и требуем Ok; код 429 превращаем в ошибку с задержкой retry_after
             TelegramEnvelope<T>? envelope = JsonSerializer.Deserialize<TelegramEnvelope<T>>(
                 body.GetBuffer().AsSpan(0, (int)body.Length));
             if (envelope?.Ok is null) {
@@ -134,6 +151,7 @@ public sealed class TelegramApiClient : IDisposable {
             }
             return envelope.Result ?? throw invalidResponse();
         }
+        // отмену вызывающего метода передаем выше, истечение собственного срока превращаем в telegram_timeout
         catch (OperationCanceledException) {
             cancellationToken.ThrowIfCancellationRequested();
             throw new TelegramApiException("Превышено время запроса Telegram API.", "telegram_timeout");
@@ -147,10 +165,12 @@ public sealed class TelegramApiClient : IDisposable {
         }
     }
 
+    // создаем ошибку некорректного или неподтвержденного ответа Bot API
     private static TelegramApiException invalidResponse() {
         return new TelegramApiException("Telegram API вернул некорректный ответ.", "telegram_invalid_response");
     }
 
+    // выдерживаем всю задержку частями до 60 секунд с возможностью отмены
     public static async Task waitRetryAfterAsync(int seconds, CancellationToken cancellationToken) {
         while (seconds > 0) {
             int part = Math.Min(seconds, 60);
@@ -159,6 +179,7 @@ public sealed class TelegramApiClient : IDisposable {
         }
     }
 
+    // при остановке приложения освобождаем принадлежащий клиенту HttpClient
     public void Dispose() {
         httpClient.Dispose();
     }

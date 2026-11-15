@@ -6,13 +6,15 @@ using Microsoft.Extensions.Options;
 
 namespace MediaDownloader.Telegram;
 
+// проверяем личное сообщение и whitelist, превращаем текст ссылок в задание очереди
 public sealed class TelegramUpdateHandler {
-    private readonly TelegramOptions options;
-    private readonly TelegramApiClient api;
-    private readonly TelegramDownloadQueue queue;
-    private readonly MediaService mediaService;
-    private readonly ILogger<TelegramUpdateHandler> logger;
+    private readonly TelegramOptions options; // whitelist из раздела Telegram
+    private readonly TelegramApiClient api; // ответы пользователю через Bot API
+    private readonly TelegramDownloadQueue queue; // передача заданий воркеру
+    private readonly MediaService mediaService; // общая проверка ссылок
+    private readonly ILogger<TelegramUpdateHandler> logger; // причины отклонения обновлений
 
+    // конструктор: сохраняем настройки доступа, API, очередь и сервис проверки
     public TelegramUpdateHandler(IOptions<TelegramOptions> options, TelegramApiClient api,
         TelegramDownloadQueue queue, MediaService mediaService, ILogger<TelegramUpdateHandler> logger) {
         this.options = options.Value;
@@ -22,26 +24,32 @@ public sealed class TelegramUpdateHandler {
         this.logger = logger;
     }
 
+    // допускаем личное сообщение разрешенного автора, проверяем ссылки и ставим их в очередь
     public async Task handleAsync(TelegramUpdate update, CancellationToken cancellationToken) {
+        // из обновления берем сообщение; события без личного чата с положительным ID пропускаем
         TelegramMessage? message = update.Message;
         if (message?.Chat is null || message.Chat.Type != "private" || message.Chat.Id <= 0) {
             return;
         }
         try {
+            // проверяем числовой ID автора по AllowedUserIds до разбора текста
             if (message.From is null || !options.AllowedUserIds.Contains(message.From.Id)) {
                 throw new AccessDeniedException();
             }
             if (string.IsNullOrWhiteSpace(message.Text)) {
                 throw new BadRequestException("Пришлите только HTTP/HTTPS-ссылки через пробелы или переносы строк.");
             }
+            // делим текст по пробельным символам и получаем MediaRequest, затем проверяем его общим сервисом
             MediaRequest request = new MediaRequest {
                 Urls = message.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).ToList()
             };
             request = new MediaRequest { Urls = mediaService.validateRequest(request) };
+            // добавляем проверенный запрос вместе с ChatId; при заполнении очереди отвечаем сразу
             if (!queue.tryEnqueue(new TelegramDownloadJob { ChatId = message.Chat.Id, Request = request })) {
                 await notifyAsync(message.Chat.Id, "Очередь заполнена. Повторите запрос позже.", cancellationToken);
             }
         }
+        // ожидаемые ошибки доступа и входа возвращаем сообщением; отмену передаем выше
         catch (AccessDeniedException exception) {
             await notifyAsync(message.Chat.Id, exception.PublicMessage, cancellationToken);
         }
@@ -57,6 +65,7 @@ public sealed class TelegramUpdateHandler {
         }
     }
 
+    // отправляем текст ошибки; при ограничении API выдерживаем указанную задержку
     private async Task notifyAsync(long chatId, string text, CancellationToken cancellationToken) {
         try {
             await api.sendMessageAsync(chatId, text, cancellationToken);
