@@ -27,7 +27,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - work-data:/app/data/work
-      - history-data:/app/data/history
+      - ./data/history:/app/data/history
 
   telegram-bot-api:
     image: media-downloader-telegram:0.1.0
@@ -48,5 +48,4 @@ services:
 
 volumes:
   work-data:
-  history-data:
   telegram-data:
