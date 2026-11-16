@@ -1,4 +1,5 @@
 using MediaDownloader.Configuration;
+using MediaDownloader.Annotations;
 using MediaDownloader.Dto;
 using MediaDownloader.Exceptions;
 using MediaDownloader.Services;
@@ -7,7 +8,7 @@ using Microsoft.Extensions.Options;
 namespace MediaDownloader.Telegram;
 
 // проверяем личное сообщение и whitelist, превращаем текст ссылок в задание очереди
-public sealed class TelegramUpdateHandler {
+public class TelegramUpdateHandler {
     private readonly TelegramOptions options; // whitelist из раздела Telegram
     private readonly TelegramApiClient api; // ответы пользователю через Bot API
     private readonly TelegramDownloadQueue queue; // передача заданий воркеру
@@ -44,8 +45,8 @@ public sealed class TelegramUpdateHandler {
                 Urls = message.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).ToList()
             };
             request = new MediaRequest { Urls = mediaService.validateRequest(request) };
-            // добавляем проверенный запрос вместе с ChatId; при заполнении очереди отвечаем сразу
-            if (!queue.tryEnqueue(new TelegramDownloadJob { ChatId = message.Chat.Id, Request = request })) {
+            // вызываем virtual-метод на текущем объекте наследника: прокси запишет ссылки перед очередью
+            if (!await enqueueAsync(request, message.Chat.Id, cancellationToken)) {
                 await notifyAsync(message.Chat.Id, "Очередь заполнена. Повторите запрос позже.", cancellationToken);
             }
         }
@@ -63,6 +64,13 @@ public sealed class TelegramUpdateHandler {
             logger.LogError("Telegram update rejected after {ExceptionType}.", exception.GetType().Name);
             await notifyAsync(message.Chat.Id, "Не удалось обработать сообщение.", cancellationToken);
         }
+    }
+
+    // передаем проверенный запрос воркеру; SaveLinks добавляет запись истории перед этим действием
+    [SaveLinks]
+    protected virtual Task<bool> enqueueAsync(MediaRequest request, long chatId, CancellationToken cancellationToken) {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(queue.tryEnqueue(new TelegramDownloadJob { ChatId = chatId, Request = request }));
     }
 
     // отправляем текст ошибки; при ограничении API выдерживаем указанную задержку

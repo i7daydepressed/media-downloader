@@ -6,4 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <DefaultItemExcludes>$(DefaultItemExcludes);tests/**;docs/**;data/**</DefaultItemExcludes>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Castle.Core" Version="5.2.1" />
+  </ItemGroup>
 </Project>

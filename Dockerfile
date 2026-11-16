@@ -29,6 +29,9 @@ USER app
 EXPOSE 8080
 
 FROM media-tools AS final
+USER root
+RUN install -d -o app -g app /app/data/history
+USER app
 COPY --from=build --chown=app:app /app/publish ./
 COPY --chown=app:app LICENSE /app/LICENSE
 ENTRYPOINT ["dotnet", "MediaDownloader.dll"]

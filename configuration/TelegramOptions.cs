@@ -14,4 +14,5 @@ public sealed class TelegramOptions {
     public int PollingTimeoutSeconds { get; set; } = 30; // ожидание сообщений в одном getUpdates, секунды
     public int RetryDelaySeconds { get; set; } = 3; // задержка повторного опроса при ошибке, секунды
     public int UploadTimeoutSeconds { get; set; } = 1800; // время одной отправки файла, секунды
+    public string LinksHistoryPath { get; set; } = "data/history/telegram-links.txt"; // постоянная история даты и URL
 }

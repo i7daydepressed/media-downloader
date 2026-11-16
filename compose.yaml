@@ -17,6 +17,7 @@ services:
       ASPNETCORE_HTTP_PORTS: "8080"
       ASPNETCORE_URLS: http://+:8080
       Media__WorkingRoot: /app/data/work
+      Telegram__LinksHistoryPath: "${Telegram__LinksHistoryPath:-/app/data/history/telegram-links.txt}"
       Telegram__Enabled: "${Telegram__Enabled:-false}"
       Telegram__BotToken: "${Telegram__BotToken:-}"
       Telegram__BaseUrl: "${Telegram__BaseUrl:-https://api.telegram.org}"
@@ -26,6 +27,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - work-data:/app/data/work
+      - history-data:/app/data/history
 
   telegram-bot-api:
     image: media-downloader-telegram:0.1.0
@@ -46,4 +48,5 @@ services:
 
 volumes:
   work-data:
+  history-data:
   telegram-data:

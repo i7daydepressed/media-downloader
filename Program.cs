@@ -1,11 +1,14 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Castle.DynamicProxy;
+using MediaDownloader.Proxies;
 using MediaDownloader.Configuration;
 using MediaDownloader.Exceptions;
 using MediaDownloader.Services;
 using MediaDownloader.Tools;
 using MediaDownloader.Telegram;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace MediaDownloader;
 
@@ -66,7 +69,34 @@ public class Program {
             provider.GetRequiredService<ILogger<TelegramApiClient>>()));
         // очередь передает задания от обработчика сообщений воркеру, polling получает обновления в фоне
         builder.Services.AddSingleton<TelegramDownloadQueue>();
-        builder.Services.AddSingleton<TelegramUpdateHandler>();
+        builder.Services.AddSingleton<LinkHistoryWriter>();
+        builder.Services.AddSingleton<SaveLinksInterceptor>();
+        builder.Services.AddSingleton<ProxyGenerator>();
+
+        builder.Services.AddSingleton<TelegramUpdateHandler>(
+            TelegramUpdateHandler (IServiceProvider serviceProvider) => {
+                
+                ProxyGenerator proxyGenerator = serviceProvider.GetRequiredService<ProxyGenerator>();
+                
+                SaveLinksProxyGenerationHook methodSelection = new SaveLinksProxyGenerationHook();
+
+                ProxyGenerationOptions proxyOptions = new ProxyGenerationOptions(methodSelection);
+
+                // получаем из контекста пять объектов для конструктора базового TelegramUpdateHandler
+                object[] handlerConstructorArguments = new object[] {
+                    serviceProvider.GetRequiredService<IOptions<TelegramOptions>>(),
+                    serviceProvider.GetRequiredService<TelegramApiClient>(),
+                    serviceProvider.GetRequiredService<TelegramDownloadQueue>(),
+                    serviceProvider.GetRequiredService<MediaService>(),
+                    serviceProvider.GetRequiredService<ILogger<TelegramUpdateHandler>>()
+                };
+
+                SaveLinksInterceptor linksInterceptor = serviceProvider.GetRequiredService<SaveLinksInterceptor>();
+                // создаем наследника: настройки выбора методов, аргументы базового конструктора и перехватчик
+                TelegramUpdateHandler handlerProxy = proxyGenerator.CreateClassProxy<TelegramUpdateHandler>(
+                    proxyOptions, handlerConstructorArguments, linksInterceptor);
+                return handlerProxy;
+            });
         builder.Services.AddHostedService<TelegramDownloadWorker>();
         builder.Services.AddHostedService<TelegramPollingService>();
 
@@ -113,6 +143,8 @@ public class Program {
 
         // проверяем реквизиты и лимиты Telegram; формат токена обязателен при включенном адаптере
         services.AddOptions<TelegramOptions>().BindConfiguration(TelegramOptions.SectionName)
+            .Validate(options => isValidPath(options.LinksHistoryPath),
+                "Telegram:LinksHistoryPath must be a valid nonempty path.")
             .Validate(options => !options.Enabled || (!string.IsNullOrWhiteSpace(options.BotToken) &&
                 Regex.IsMatch(options.BotToken, "^[0-9]+:[A-Za-z0-9_-]+$")),
                 "Telegram:BotToken is required in token format when Telegram is enabled.")

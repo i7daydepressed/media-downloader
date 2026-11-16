@@ -2,6 +2,10 @@
 **
 !MediaDownloader.csproj
 !Program.cs
+!annotations/
+!annotations/*.cs
+!proxies/
+!proxies/*.cs
 !appsettings.json
 !LICENSE
 !configuration/
